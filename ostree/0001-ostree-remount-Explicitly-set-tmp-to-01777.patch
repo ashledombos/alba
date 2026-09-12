@@ -1,0 +1,17 @@
+--- ostree-2017.15/src/switchroot/ostree-remount.c.0002~	2018-01-12 21:36:07.444055533 +0100
++++ ostree-2017.15/src/switchroot/ostree-remount.c	2018-01-12 21:38:27.223382567 +0100
+@@ -83,5 +83,14 @@ main(int argc, char *argv[])
+         printf ("Remounted: %s\n", target);
+     }
+ 
++
++  /* Ensure /sysroot/tmp is world-writable.  Works around a bug
++   * where init-fs left the directory writable only to root. */
++  if (chmod ("/sysroot/tmp", 01777) == -1)
++    {
++      perror ("failed to chmod /sysroot/tmp");
++      exit (EXIT_FAILURE);
++    }
++
+   exit (EXIT_SUCCESS);
+ }

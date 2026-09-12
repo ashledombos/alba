@@ -1,0 +1,11 @@
+# Alba — dépôt perso ABF hébergeant les 4 briques manquantes :
+#   composefs, ostree (rebâti --with-composefs), bootc, bootupd
+# À AJUSTER : remplacer <USER> et l'URL par ton dépôt perso ABF publié.
+# priority=1 pour que notre ostree patché prime sur celui des dépôts ROME.
+# gpgcheck=0 : POC (dépôt perso non signé) ; à activer en production.
+[alba-bricks]
+name=Alba bricks (personal ABF)
+baseurl=https://abf-downloads.openmandriva.org/personal/<USER>/alba/rolling/$basearch/main/release/
+enabled=1
+gpgcheck=0
+priority=1

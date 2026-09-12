@@ -1,0 +1,69 @@
+# syntax=docker/dockerfile:1
+#
+# Alba — Containerfile.alba : couche desktop Plasma (identité Alba) sur la base bootc.
+# FROM la base minimale bootc OMV ROME. Ajoute Plasma slim + SDDM.
+# Passage POC : desktop qui démarre (SDDM). Flathub/brew/distrobox : étape suivante.
+
+FROM localhost/alba-base
+
+# Le dépôt local des briques (file:///rpms) n'est pas monté ici ; on le retire
+# (les briques sont déjà dans la base). Plasma vient des dépôts ROME.
+RUN rm -f /etc/yum.repos.d/alba-local.repo
+
+# Plasma slim. On GARDE les weak deps ici : le greeter SDDM (thème Breeze) a besoin
+# de ses composants QML tirés en Recommends (sans eux : seul le fond se rend).
+# + plasma-workspace et le style QML breeze pour le rendu des widgets.
+RUN dnf -y install \
+      plymouth fontconfig xdg-user-dirs xdg-utils \
+      task-plasma-minimal plasma-workspace qqc2-breeze-style qt6-qtwayland \
+      sddm sddm-theme-breeze plasma-pa \
+      systemsettings dolphin \
+  && dnf clean all \
+  && rm -rf /var/cache/* /var/log/* /tmp/*
+
+# Démarrer sur l'interface graphique (SDDM)
+RUN systemctl set-default graphical.target; \
+    systemctl enable sddm.service 2>/dev/null || true
+
+# Rendu et entrées en VM (Wayland logiciel) :
+#  - QT_QUICK_BACKEND=software : Qt Quick via llvmpipe (sinon seul le fond se dessine) ;
+#  - KWIN_FORCE_SW_CURSOR=1 : curseur LOGICIEL — le virtio-gpu de la VM n'expose pas
+#    de plan de curseur matériel, d'où le curseur invisible et l'impression de souris
+#    figée dans la session/greeter Wayland.
+RUN mkdir -p /etc/systemd/system/sddm.service.d && \
+    printf '[Service]\nEnvironment=QT_QUICK_BACKEND=software\nEnvironment=KWIN_FORCE_SW_CURSOR=1\n' \
+        > /etc/systemd/system/sddm.service.d/qt-software.conf && \
+    printf 'QT_QUICK_BACKEND=software\nKWIN_FORCE_SW_CURSOR=1\n' >> /etc/environment
+
+# Compte de démo (l'image n'a que root sans mot de passe → SDDM n'a personne à
+# connecter). Utilisateur « alba » (mdp « alba »), home dans /var/home (persistant),
+# wheel pour sudo. Autologin SDDM sur la session Plasma (Wayland) : on arrive direct
+# sur le bureau, sans passer par le greeter (donc pas de saisie à faire).
+# Le home d'alba n'est PAS baké dans /var (bootc : /var doit être recréable
+# par tmpfiles ; des fichiers y déclencheraient le lint var-tmpfiles). Le skel
+# part dans /usr et tmpfiles le copie au premier boot (C) puis fixe l'owner (Z).
+RUN useradd -m -d /var/home/alba -G wheel -s /bin/bash alba && \
+    echo 'alba:alba' | chpasswd && \
+    mkdir -p /usr/share/alba-skel && cp -a /var/home/alba/. /usr/share/alba-skel/ && \
+    rm -rf /var/home/alba /var/spool/mail/alba && \
+    printf 'C /var/home/alba 0700 alba alba - /usr/share/alba-skel\nZ /var/home/alba - alba alba -\nf /var/spool/mail/alba 0660 alba mail -\n' \
+        > /usr/lib/tmpfiles.d/alba-home.conf && \
+    printf 'alba ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/alba && chmod 0440 /etc/sudoers.d/alba && \
+    mkdir -p /etc/sddm.conf.d && \
+    printf '[Autologin]\nUser=alba\nSession=plasma\nRelogin=false\n' \
+        > /etc/sddm.conf.d/zz-alba-autologin.conf
+
+# Manifestes sysusers/tmpfiles à jour (users et contenu /var ajoutés par la
+# couche : sddm, alba, caches dnf…) + /run,/tmp,/var/tmp vides pour le lint.
+# + /boot re-vidé : grub2-breeze-theme (tiré par Plasma) repeuple /boot/grub2,
+# or une image bootc doit avoir /boot vide (le payload bootloader est déjà
+# capturé dans /usr/lib/bootupd/updates depuis la base).
+RUN /usr/lib/alba/gen-image-manifests.sh && \
+    find /run -mindepth 1 -maxdepth 1 ! -name .containerenv ! -name secrets -exec rm -rf {} + 2>/dev/null; \
+    rm -rf /tmp/* /var/tmp/* 2>/dev/null; \
+    rm -rf /boot/* /boot/.[!.]* 2>/dev/null; true
+
+LABEL containers.bootc=1
+LABEL org.opencontainers.image.title="Alba (OpenMandriva ROME bootc) — Plasma"
+
+RUN bootc container lint || echo "=== ALBA: lint warnings (voir sortie) ==="

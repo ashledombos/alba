@@ -1,0 +1,28 @@
+--- a/ostree.spec
++++ b/ostree.spec
+@@ -11,7 +11,7 @@
+ Summary:	Tool for managing bootable, immutable filesystem trees
+ Name:		ostree
+ Version:	2024.9
+-Release:	2
++Release:	3
+ #VCS: git:git://git.gnome.org/ostree
+ Source0:	https://github.com/ostreedev/ostree/releases/download/v%{version}/libostree-%{version}.tar.xz
+ Source1:	91-ostree.preset
+@@ -48,6 +48,8 @@
+ BuildRequires:	pkgconfig(libcurl)
+ BuildRequires:	pkgconfig(openssl)
+ BuildRequires:	dracut
++# Alba: composefs backend pour ostree/bootc (fourni par lib64composefs-devel)
++BuildRequires:	pkgconfig(composefs)
+
+ # Runtime requirements
+ Requires:	dracut
+@@ -116,6 +118,7 @@
+     --enable-gtk-doc \
+     --with-curl \
+     --with-openssl \
++    --with-composefs \
+     --with-dracut=yesbutnoconf
+
+ # https://gitlab.gnome.org/GNOME/gobject-introspection/issues/280

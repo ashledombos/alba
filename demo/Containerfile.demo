@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+#
+# Alba — image de DÉMO pour prouver l'upgrade/rollback atomique (bootc).
+# FROM la base bootc minimale. Ajoute sshd + accès root (POC) pour piloter bootc
+# dans la VM, une config registry insecure (pull depuis le registry local via
+# QEMU user-net 10.0.2.2), et un marqueur de version visible.
+#
+# Build en 2 versions via --build-arg ALBA_VER=1 puis =2.
+
+FROM localhost/alba-base
+
+ARG ALBA_VER=1
+
+RUN rm -f /etc/yum.repos.d/alba-local.repo
+
+# sshd pour piloter la démo
+RUN dnf -y install openssh-server && dnf clean all && rm -rf /var/cache/* /var/log/* /tmp/*
+RUN systemctl enable sshd.service
+
+# Auth par CLÉ (fiable sur bootc : /root=/var/roothome n'est pas garanti depuis
+# l'image → on lit la clé depuis /usr, contenu image toujours présent).
+COPY alba_authorized_key.pub /usr/lib/ssh/alba-root.pub
+RUN echo 'root:alba' | chpasswd && \
+    mkdir -p /etc/ssh/sshd_config.d && \
+    printf 'PermitRootLogin yes\nPasswordAuthentication yes\nPubkeyAuthentication yes\nAuthorizedKeysFile /usr/lib/ssh/alba-root.pub .ssh/authorized_keys\n' \
+      > /etc/ssh/sshd_config.d/10-alba-demo.conf
+
+# registry local insecure (le registry tourne sur clairdelune = 10.0.2.2 vu de la VM)
+RUN mkdir -p /etc/containers/registries.conf.d && \
+    printf '[[registry]]\nlocation = "10.0.2.2:5000"\ninsecure = true\n' \
+      > /etc/containers/registries.conf.d/10-alba-local.conf
+
+# Manifestes sysusers/tmpfiles à jour (openssh ajoute user/contenu /var)
+# + /run,/tmp,/var/tmp vides pour le lint.
+RUN /usr/lib/alba/gen-image-manifests.sh && \
+    find /run -mindepth 1 -maxdepth 1 ! -name .containerenv ! -name secrets -exec rm -rf {} + 2>/dev/null; \
+    rm -rf /tmp/* /var/tmp/* 2>/dev/null; true
+
+# marqueur de version (visible pour prouver l'upgrade/rollback) — EN DERNIER :
+# seule cette couche diffère entre v1 et v2 → le switch ne transfère que
+# quelques ko (l'argument dédup de la démo).
+RUN echo "ALBA VERSION ${ALBA_VER}" > /etc/alba-version
+
+LABEL containers.bootc=1
+LABEL org.opencontainers.image.title="Alba démo v${ALBA_VER}"
+
+RUN bootc container lint || echo "lint warnings"

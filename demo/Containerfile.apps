@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1
+# Alba — variante "apps" : base démo (SSH par clé) + les outils d'installation de
+# logiciels du modèle atomique (Flatpak, distrobox). Sert à démontrer comment on
+# installe des logiciels SANS toucher à la base immuable.
+FROM localhost/alba-demo:v1
+
+RUN rm -f /etc/yum.repos.d/alba-local.repo
+RUN dnf -y install flatpak distrobox && dnf clean all && rm -rf /var/cache/* /var/log/* /tmp/*
+LABEL containers.bootc=1
+RUN bootc container lint || echo "lint warnings"

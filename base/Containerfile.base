@@ -1,0 +1,137 @@
+# syntax=docker/dockerfile:1
+#
+# Alba — Containerfile.base (build LOCAL sur clairdelune, POC)
+# Base bootc OpenMandriva ROME (x86_64), consommant nos briques locales
+# (composefs, ostree+composefs 2026.2, bootc) via file:///rpms
+# (monté au build : podman build --volume ~/alba/rpms:/rpms:z).
+#
+# Approche mono-stage FROM cooker : on installe DANS la racine de l'image
+# (pas d'--installroot, qui casse le scriptlet %sysusers de systemd en chroot).
+# systemd s'y installe correctement. bootupd + skopeo DIFFÉRÉS.
+# Passage 1 = MINIMAL (sans Plasma) : valider structure baseimage + bootc lint.
+
+FROM docker.io/openmandriva/cooker:x86_64
+
+# dépôt local des briques
+RUN printf '[alba-local]\nname=Alba local bricks\nbaseurl=file:///rpms\nenabled=1\ngpgcheck=0\npriority=1\n' \
+      > /etc/yum.repos.d/alba-local.repo
+RUN dnf --refresh -y update distro-release-repos distro-release-repos-keys || true
+
+# Slim : catalogues de traduction limités à en/fr (l'essentiel de
+# /usr/share/locale). Le macro ne couvre que les installs à venir ; le
+# balayage final ramasse ce que le rootfs cooker embarquait déjà.
+# PAS de tsflags=nodocs : bootc container lint re-vérifie la copie de référence
+# baseimage embarquée dans /usr/share/doc/bootc/ — nodocs l'ampute → faux
+# « Missing ostree -> sysroot/ostree link » (et la doc ne pèse que ~3 Mo).
+RUN printf '%%_install_langs en:fr\n' > /etc/rpm/macros.zz-alba-langs
+
+# socle bootable + briques bootc (installé dans la racine → systemd OK)
+RUN dnf -y --setopt=install_weak_deps=False install \
+      systemd systemd-console udev dbus-broker \
+      dnf5 sudo less procps-ng psmisc timezone locales-en rootfiles passwd \
+      e2fsprogs util-linux dosfstools mtools \
+      kernel dracut dracut-modules-growroot \
+      bootc ostree composefs bootupd skopeo \
+      grub2 grub2-efi ostree-grub2 \
+      podman netavark aardvark-dns \
+      networkmanager \
+  && dnf clean all \
+  && rm -rf /var/cache/* /var/log/* /tmp/*
+
+# contenu baseimage bootc (hard requirement)
+COPY prepare-root.conf /usr/lib/ostree/prepare-root.conf
+COPY 10-bootc-base.conf /usr/lib/dracut.conf.d/10-bootc-base.conf
+COPY kernel-install.conf /usr/lib/kernel/install.conf
+RUN mkdir -p /sysroot && ln -snf sysroot/ostree /ostree
+
+# Convention bootc/ostree (comme Kinoite) : /home et /root sont MUTABLES → sur /var
+# (persistant). Sans ça, les homes sont en lecture seule (distrobox/login cassés).
+RUN rm -rf /home /root /opt && \
+    ln -snf var/home /home && \
+    ln -snf var/roothome /root && \
+    ln -snf var/opt /opt && \
+    mkdir -p /var/home /var/roothome /var/opt && chmod 0700 /var/roothome
+
+# noyau + initramfs dans /usr/lib/modules/$kver/
+RUN set -eux; \
+    kver="$(ls -1 /usr/lib/modules | grep -E '^[0-9]' | head -1)"; \
+    moddir="/usr/lib/modules/$kver"; \
+    # OMV pose $moddir/vmlinuz comme symlink vers /boot ; le remplacer par le VRAI fichier
+    # (sinon il pend après nettoyage de /boot → bootc lint: "path led outside filesystem")
+    rm -f "$moddir/vmlinuz"; \
+    if [ -e "/boot/vmlinuz-$kver" ]; then cp -a "/boot/vmlinuz-$kver" "$moddir/vmlinuz"; fi; \
+    dracut --force --no-hostonly --reproducible \
+        --add "ostree bootc" --add-drivers "erofs overlay" \
+        --kver "$kver" "$moddir/initramfs.img"; \
+    test -f "$moddir/vmlinuz"; test -f "$moddir/initramfs.img"
+
+# bootupd : capturer le payload bootloader AVANT de vider /boot.
+# bootupd lit l'EFI depuis /usr/lib/ostree-boot/EFI (convention Fedora), or grub2-efi
+# OMV pose dans /boot/efi/EFI → on stage au bon endroit d'abord.
+RUN set -eux; \
+    mkdir -p /usr/lib/ostree-boot/efi; \
+    cp -a /boot/efi/EFI /usr/lib/ostree-boot/efi/EFI; \
+    # OMV grub 2.14 : blscfg (via blsuki) veut le chemin explicite des entrées BLS
+    # (/boot est un dossier de la racine, pas une partition → défaut /loader/entries KO)
+    # + -d -n pour afficher default et non-default. Sinon menu vide → prompt grub.
+    sed -i 's#^blscfg$#blscfg --path /boot/loader/entries -d -n#' \
+        /usr/lib/bootupd/grub2-static/configs.d/10_blscfg.cfg; \
+    grep -H blscfg /usr/lib/bootupd/grub2-static/configs.d/10_blscfg.cfg; \
+    bootupctl backend generate-update-metadata /; \
+    echo "=== ALBA: metadata bootupd ==="; ls /usr/lib/bootupd/updates/; \
+    # Fallback UEFI \EFI\BOOT\BOOTX64.EFI : sans entrée NVRAM (image générique),
+    # le firmware ne connaît que ce chemin. Le grub.efi OMV embarque le prefix
+    # /EFI/BOOT → on met à côté un grub.cfg de redirection qui LOCALISE la racine
+    # par fichier (aucune dépendance UUID/label, robustes aux réinstalls).
+    # Ajouté APRÈS generate-update-metadata : le payload est copié tel quel sur
+    # l'ESP à l'install (copy_dir), et rpm -qf n'est plus consulté.
+    mkdir -p /usr/lib/bootupd/updates/EFI/BOOT; \
+    cp /usr/lib/bootupd/updates/EFI/openmandriva/grub.efi \
+       /usr/lib/bootupd/updates/EFI/BOOT/BOOTX64.EFI; \
+    printf 'search --no-floppy --file --set=root /boot/grub2/grub.cfg\nset prefix=($root)/boot/grub2\nconfigfile $prefix/grub.cfg\n' \
+       > /usr/lib/bootupd/updates/EFI/BOOT/grub.cfg
+# /boot doit être vide dans l'image bootc (entrées BLS posées au déploiement)
+RUN rm -rf /boot/* /boot/.[!.]* 2>/dev/null || true
+
+# Réseau : NetworkManager (auto-DHCP sur le filaire en headless ; requis aussi par
+# la couche Plasma via plasma-nm). NB : systemd-networkd entre en CONFLIT RPM avec
+# NetworkManager sous OMV → on ne prend que NM, cohérent base + bureau.
+RUN systemctl enable NetworkManager.service
+
+# Menu grub INDÉPENDANT de la version : grub 2.12 d'OMV n'a ni blscfg/blsuki, et
+# grub2-mkconfig échoue sur une racine composefs (grub2-probe). On génère donc des
+# menuentries explicites depuis les entrées BLS (sans sonder le périphérique).
+# /boot étant monté ro au runtime, la régénération se fait via un service qui le
+# remonte rw au boot (rattrapage) ET avant l'extinction (ExecStop) : après un
+# « bootc upgrade », le grub.cfg est ainsi refait pour pointer le nouveau déploiement.
+COPY gen-grub-menu.sh /usr/lib/alba/gen-grub-menu.sh
+COPY gen-grub-menu-rw.sh /usr/lib/alba/gen-grub-menu-rw.sh
+COPY alba-grub-menu.service /usr/lib/systemd/system/alba-grub-menu.service
+# Le déclencheur PRINCIPAL est un drop-in sur ostree-finalize-staged.service :
+# après un « bootc upgrade/switch/rollback », ostree finalise le déploiement à
+# l'extinction, puis notre script régénère grub.cfg (même chaîne ExecStop, sans course).
+# alba-grub-menu.service ne fait plus qu'un rattrapage au boot (anti-dérive).
+COPY ostree-finalize-staged-alba.conf \
+     /usr/lib/systemd/system/ostree-finalize-staged.service.d/10-alba-grub-menu.conf
+RUN chmod 0755 /usr/lib/alba/gen-grub-menu.sh /usr/lib/alba/gen-grub-menu-rw.sh && \
+    systemctl enable alba-grub-menu.service
+
+# Manifestes systemd exigés par bootc lint : sysusers.d généré depuis
+# passwd/group, tmpfiles.d généré depuis le contenu de /var (rpmdb déplacé
+# vers /usr/lib/sysimage/rpm au passage). Les couches dérivées relancent ce
+# script après tout useradd/dnf install.
+COPY gen-image-manifests.sh /usr/lib/alba/gen-image-manifests.sh
+RUN chmod 0755 /usr/lib/alba/gen-image-manifests.sh && /usr/lib/alba/gen-image-manifests.sh
+
+# /run, /tmp et /var/tmp doivent être vides dans l'image (lint nonempty-run-tmp).
+# .containerenv et secrets sont des montages podman : on les épargne.
+# + balayage locales : ne garder que en*/fr* (le reste vient du rootfs cooker,
+# installé avant notre macro %_install_langs).
+RUN find /run -mindepth 1 -maxdepth 1 ! -name .containerenv ! -name secrets -exec rm -rf {} + 2>/dev/null; \
+    rm -rf /tmp/* /tmp/.[!.]* /var/tmp/* 2>/dev/null; \
+    find /usr/share/locale -mindepth 1 -maxdepth 1 -type d ! -name 'en*' ! -name 'fr*' -exec rm -rf {} + 2>/dev/null; true
+
+LABEL containers.bootc=1
+LABEL org.opencontainers.image.title="Alba base (OpenMandriva ROME bootc) — minimal POC"
+
+RUN bootc container lint || echo "=== ALBA: bootc container lint a signalé des écarts (voir ci-dessus) ==="

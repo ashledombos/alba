@@ -1,0 +1,15 @@
+[Unit]
+Description=Alba — régénère le menu grub (entrées BLS explicites) au démarrage
+Documentation=man:boot(7)
+DefaultDependencies=no
+After=local-fs.target
+RequiresMountsFor=/boot
+Before=basic.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/alba/gen-grub-menu-rw.sh
+
+[Install]
+WantedBy=multi-user.target
