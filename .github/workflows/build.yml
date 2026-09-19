@@ -1,0 +1,107 @@
+# Alba — construction de la base bootc et publication sur GHCR.
+#
+# Le runner GitHub est jetable et ne ressemble pas à clairdelune : ni wrapper
+# sudo dédié (alba-imgbuild), ni slice systemd (alba.slice), ni image
+# localhost/omv-builder pré-construite, et surtout pas de /dev/kvm garanti.
+# On remplace donc ces parties par du podman/buildah standard, et le SEUL
+# garde-fou ici est `bootc container lint` : le boot en VM reste un test local
+# (tools/alba-install.sh + tools/alba-demo-cycle.sh sur un hôte avec KVM).
+#
+# Chaîne : 6 briques RPM dans un conteneur cooker → dépôt local rpms/ →
+# base mono-stage FROM openmandriva/cooker → lint → push ghcr.io avec un tag daté.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILDER_IMAGE: docker.io/openmandriva/cooker:x86_64
+  LOCAL_IMAGE: localhost/alba-base
+
+jobs:
+  base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Étiquettes de l'image
+        id: meta
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/$owner/alba-base" >> "$GITHUB_OUTPUT"
+          echo "tag=$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # La base fait ~1 Go, les six briques et leurs arbres de build bien plus :
+      # le runner n'a qu'une quinzaine de Go libres sur /.
+      - name: Libérer de l'espace disque
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      # Rebuild complet à chaque fois (pas de cache d'artefacts) : cooker est
+      # rolling, une brique construite la semaine dernière ne prouve rien sur
+      # les dépôts d'aujourd'hui — c'est précisément la régression qu'on surveille.
+      - name: Construire les 6 briques RPM
+        run: |
+          podman run --rm \
+            -v "$PWD:/work" -w /work \
+            "$BUILDER_IMAGE" \
+            bash tools/ci-build-rpms.sh
+
+      - name: Publier les RPM en artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alba-rpms-${{ steps.meta.outputs.tag }}
+          path: rpms/*.rpm
+          if-no-files-found: error
+          retention-days: 30
+
+      # --no-cache : sans lui, le layer `dnf --refresh` sert des métadonnées
+      # périmées et la résolution échoue sur des paquets pourtant présents.
+      # Mono-stage FROM cooker, JAMAIS FROM scratch + dnf --installroot : en
+      # chroot le scriptlet %sysusers de systemd ne passe pas, le manager n'est
+      # pas installé et dracut-systemd échoue (piège documenté dans le README).
+      - name: Assembler la base bootc
+        run: |
+          podman build --no-cache \
+            -v "$PWD/rpms:/rpms" \
+            -f base/Containerfile.base \
+            -t "$LOCAL_IMAGE" \
+            base
+          podman images "$LOCAL_IMAGE"
+
+      # Le lint est déjà appelé en fin de Containerfile.base, mais il y est
+      # tolérant (`|| echo`) pour laisser un build local aboutir. Ici il doit
+      # faire échouer le workflow : c'est le seul garde-fou de la CI.
+      - name: bootc container lint
+        run: podman run --rm "$LOCAL_IMAGE" bootc container lint
+
+      - name: Connexion à ghcr.io
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | podman login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+
+      - name: Pousser l'image
+        run: |
+          img="${{ steps.meta.outputs.image }}"
+          tag="${{ steps.meta.outputs.tag }}"
+          podman tag "$LOCAL_IMAGE" "$img:$tag" "$img:latest"
+          podman push "$img:$tag"
+          podman push "$img:latest"
+          echo "### Image poussée : \`$img:$tag\`" >> "$GITHUB_STEP_SUMMARY"

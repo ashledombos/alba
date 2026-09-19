@@ -59,6 +59,29 @@ Boot VM : QEMU/KVM rootless (conteneur `localhost/alba-qemu`), BIOS/SeaBIOS
 direct, ou UEFI/OVMF (fallback BOOTX64.EFI ; VARS neuf OK). Export :
 qcow2 compressé via `qemu-img convert -c` (GNOME Boxes : BIOS, Secure Boot off).
 
+## Intégration continue (GitHub Actions)
+
+`.github/workflows/build.yml` — sur push vers `main` et sur déclenchement
+manuel : les 6 briques RPM (`tools/ci-build-rpms.sh`, dans un conteneur
+`openmandriva/cooker`), puis `base/Containerfile.base`, puis
+`bootc container lint` en garde-fou **bloquant**, puis push de
+`ghcr.io/<compte>/alba-base` avec un tag daté (`AAAAMMJJ-<sha>`) et `latest`.
+Authentification par le `GITHUB_TOKEN` du workflow (`permissions: packages: write`).
+
+Le runner n'a **pas de KVM garanti** : aucun boot de VM en CI. Le lint est donc
+le seul garde-fou automatique ; boot, upgrade et rollback continuent de se
+vérifier à la main sur un hôte avec KVM (`tools/alba-install.sh`,
+`tools/alba-demo-cycle.sh`). Rien n'est mis en cache d'un run à l'autre : cooker
+est rolling, et c'est justement la régression (cf. grub 2.14 → 2.12) qu'on veut
+voir tomber.
+
+`tools/ci-build-rpms.sh` est la version « runner jetable » des `build-<brique>.sh`
+de l'hôte de build : pas de wrapper sudo, pas de slice systemd, pas d'image
+`omv-builder` pré-construite (le conteneur cooker s'outille lui-même). Il génère
+aussi le tarball vendor de bootupd (`cargo vendor` + élargissement de la borne
+openssl-sys pour OpenSSL 4.x + recalcul du `.cargo-checksum.json`), qui n'est pas
+versionné.
+
 ## Pièges connus (résolus, ne pas re-payer)
 
 - **grub rolling** : 2.14 a `blscfg` (via blsuki), 2.12 non → ne JAMAIS dépendre
