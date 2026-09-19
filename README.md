@@ -1,5 +1,10 @@
 # Alba — variante KDE atomique/immutable d'OpenMandriva
 
+⚠️ **Statut : projet personnel exploratoire, non officiel.** Alba est mené
+en solo par un contributeur OpenMandriva, à titre d'étude technique. Ni le
+nom « Alba » ni ce dépôt n'ont été validés par le comité technique
+d'OpenMandriva. Rien ici n'engage le projet OpenMandriva.
+
 POC **fonctionnel** d'une base **bootc** pour OpenMandriva ROME (x86_64),
 modèle Kinoite/Aurora : boot + upgrade + rollback atomiques prouvés en VM.
 Présentation et argumentaire : `PITCH.md`. Plan d'origine :

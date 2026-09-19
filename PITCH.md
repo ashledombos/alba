@@ -1,5 +1,10 @@
 # Alba — an atomic KDE edition of OpenMandriva (working PoC)
 
+⚠️ **Status: personal, unofficial exploration.** Alba is a solo effort by
+an OpenMandriva contributor, meant to inform a discussion with the
+Technical Committee. Neither the name "Alba" nor this repository have
+been endorsed by the TC. Nothing here commits the OpenMandriva project.
+
 *Alba Longa, the mother city of Rome — an image-based edition built on ROME.*
 
 ## What it is
