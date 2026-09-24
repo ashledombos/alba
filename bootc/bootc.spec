@@ -86,6 +86,9 @@ cargo build --release --offline --bins
 %install
 export CARGO_HOME="%{_builddir}/%{name}-%{version}/.cargo"
 export CARGO_NET_OFFLINE=true
+# Même neutralisation qu'en %build : chaque section tourne dans un shell neuf,
+# et make install recompile xtask (cible manpages) avec le profil release.
+export CARGO_PROFILE_RELEASE_LTO=false
 # Le Makefile de bootc installe binaire + unités + hooks (DESTDIR/prefix standard)
 %make_install INSTALL="install -p -c"
 make install-ostree-hooks DESTDIR=%{buildroot}
