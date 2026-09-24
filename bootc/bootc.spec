@@ -70,6 +70,14 @@ fi
 %build
 export CARGO_HOME="%{_builddir}/%{name}-%{version}/.cargo"
 export CARGO_NET_OFFLINE=true
+# LTO neutralisé : le profil release de bootc compile en « -C lto=thin », et le
+# rustc de cooker tombe en erreur interne dans le codegen LTO
+#   rustc-LLVM ERROR: expected function definition ..._rust_alloc to have an
+#   associated value info
+# dès le premier crate compilé (xtask, cible « manpages »). Sans LTO, la brique
+# se construit entière. Régression de toolchain, à retirer quand cooker l'aura
+# corrigée ; le coût est un binaire un peu plus gros, sans effet sur le POC.
+export CARGO_PROFILE_RELEASE_LTO=false
 %if %{with manpages}
 make manpages
 %endif
