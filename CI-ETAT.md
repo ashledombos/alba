@@ -73,7 +73,7 @@ s'arrête plus loin.
 signale au passage les autres `.pc` dont le `libdir` pointe `/usr/lib` : c'est le
 même piège qui attend la prochaine brique.
 
-## Ce qui bloque maintenant : bootc
+## bootc : LTO et régression rustc (réglé)
 
 La brique suivante, `bootc`, échoue à la compilation de son `xtask` (cible
 `manpages` du Makefile), sur une erreur interne du compilateur :
@@ -87,8 +87,17 @@ make: *** [Makefile:44: manpages] Error 101
 
 C'est une régression de la toolchain Rust de cooker, sans rapport avec le lien
 d'ostree : le profil `release` de bootc compile en `-C lto=thin`, et l'ICE tombe
-dans le codegen LTO. Piste en cours d'essai : neutraliser le LTO pour cette
-brique (`CARGO_PROFILE_RELEASE_LTO=false`).
+dans le codegen LTO. Correctif : `CARGO_PROFILE_RELEASE_LTO=false`, exporté en
+`%build` ET en `%install` (chaque section de spec tourne dans un shell neuf, et
+`make install` recompile `xtask` ; la première tentative, posée en `%build`
+seul, a échoué pour cette raison au run 36008450889). À retirer quand cooker
+aura corrigé son rustc.
 
 Runs de référence : 35452447126 et 35453023297 (échec ostree, avant correctif),
-36005802490 (ostree passé, échec bootc).
+36005802490 (ostree passé, échec bootc),
+36019922314 (vert : 6 briques, lint 13/13, image poussée).
+
+## Résultat
+
+Premier run vert le 24-09 : `ghcr.io/ashledombos/alba-base`, tags
+`20260924-f96f52c` et `latest`, lisibles sans authentification.
