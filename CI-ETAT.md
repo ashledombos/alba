@@ -6,70 +6,89 @@ Le workflow ne se déclenchait pas : il écoutait `push` sur `main`, alors que l
 branche par défaut du dépôt est `master`. Corrigé (commit « CI: declencher sur
 master »). Depuis, chaque poussée lance bien le job `base`.
 
-Les étapes `Set up job`, `checkout`, `Étiquettes de l'image` et `Libérer de
-l'espace disque` passent. La brique `composefs` se construit intégralement
-(6 RPM produits, `lib64composefs1`, `lib64composefs-devel`, etc.).
+Les briques `composefs` et `ostree` se construisent intégralement : 6 RPM pour
+la première, 8 pour la seconde (`ostree`, `lib64ostree1`, `lib64ostree-devel`,
+`lib64ostree-gir1.0`, `ostree-grub2`, plus les paquets de débogage).
 
-## Ce qui bloque
+## Le lien d'ostree en elf32-i386 : cause réelle
 
-La brique `ostree` échoue au lien de `libostree-1.so.1.0.0`, en `%build` :
+Symptôme : `libostree-1.so.1.0.0` ne se liait pas, `ld.lld` déclarant
+incompatibles avec **elf32-i386** tous les fichiers reçus, y compris le tout
+premier (`crti.o`, pourtant 64 bits).
 
-```
-ld.lld: error: /usr/bin/../lib64/gcc/x86_64-openmandriva-linux-gnu/16.2.0/../../../../lib64/crti.o
-        is incompatible with elf32-i386
-ld.lld: error: src/libostree/.libs/libostree_1_la-ostree-core.o is incompatible with elf32-i386
-[... 20 erreurs, puis « too many errors emitted »]
-cc: error: linker command failed with exit code 1
-slibtool-shared: error logged in slbt_exec_link_create_library(), line 369
-```
+La chaîne, mesurée sur clairdelune dans le même conteneur
+`openmandriva/cooker:x86_64` (reproduction fidèle, hors runner) :
 
-Autrement dit, `ld.lld` a retenu **elf32-i386** comme cible, et déclare
-incompatible *tout* ce qu'on lui donne, y compris le tout premier fichier
-(`crti.o`, 64 bits). La ligne de lien produite par `slibtool-shared` contient
-pourtant `-m64 -march=znver1`, et la compilation de chaque `.o` s'est bien faite
-en 64 bits.
+1. `libarchive.pc` d'OpenMandriva déclare `libdir=${exec_prefix}/lib`, alors que
+   la bibliothèque 64 bits vit dans `/usr/lib64`. `pkg-config --libs libarchive`
+   rend donc `-L/usr/lib -larchive` ;
+2. `configure` recopie ce `-L/usr/lib` dans les `LIBS` d'ostree, et il se
+   retrouve en **deuxième position** sur la ligne de lien, avant tous les
+   `-L…/lib64` ;
+3. sur OMV, `/usr/lib` est le répertoire 32 bits, et `glibc-devel` (tiré par les
+   BuildRequires) y pose `/usr/lib/libc.so`, qui n'est pas une bibliothèque mais
+   un script ld :
 
-Deux runs successifs, échec identique au même endroit :
+   ```
+   OUTPUT_FORMAT(elf32-i386)
+   GROUP ( /usr/lib/libc.so.6 /usr/lib/libc_nonshared.a AS_NEEDED ( /usr/lib/ld-linux.so.2 ) )
+   ```
 
-- run 35452447126 (échec en 5 min 51 s)
-- run 35453023297 (échec en 4 min 45 s, avec le diagnostic ajouté)
+4. `ld.lld` résout `-lc` sur ce script, en applique l'`OUTPUT_FORMAT` et écrase
+   ainsi le `-m elf_x86_64` que le driver clang lui avait bel et bien passé.
+   Tout le reste devient « incompatible with elf32-i386 ».
 
-## Piste explorée, et écartée par la mesure
-
-Seule anomalie visible de la ligne de lien : `-L/usr/lib -larchive`, alors que
-sur OMV x86_64 le 64 bits vit dans `/usr/lib64` et que `/usr/lib` est le
-répertoire 32 bits. Hypothèse : une `libarchive` 32 bits traînant dans
-`/usr/lib` aurait fait basculer l'inférence de cible de `lld`.
-
-Un bloc `diagnostic_toolchain` a été ajouté à `tools/ci-build-rpms.sh` pour le
-vérifier. Résultat, dans le conteneur `openmandriva/cooker:x86_64` du runner :
+L'invocation réelle du linker, obtenue en rejouant le lien avec `-v`, le montre
+sans ambiguïté :
 
 ```
-ls: cannot access '/usr/lib/libarchive*': No such file or directory
-/usr/lib64/libarchive.so.13 -> libarchive.so.13.8.1
+"/usr/bin/ld.lld" ... -m elf_x86_64 -shared -o .libs/libostree-1.so.1.0.0 \
+  .../lib64/crti.o ... -L.libs -L/usr/lib -L/usr/lib64/clang/23/... -L/usr/lib64 ...
 ```
 
-Il n'y a **aucune** `libarchive` 32 bits. L'hypothèse multilib est fausse ;
-`-L/usr/lib` pointe sur un répertoire vide et ne peut pas expliquer la cible
-elf32-i386. Le diagnostic est conservé dans le script : il tourne avant les
-briques, ne coûte rien et ne peut pas interrompre le build.
+La bissection sur cette ligne est nette : en retirant le seul `-L/usr/lib`, le
+lien aboutit ; en retirant les archives `--whole-archive`, le `--version-script`
+ou les `-l` applicatifs, l'erreur persiste.
 
-Toolchain relevée dans le conteneur : clang 23.1.1 (cible
-`x86_64-pc-linux-gnu`), LLD 23.1.1, gcc 16.2.0.
+`slibtool` est donc hors de cause : il ne faisait que transmettre ce que
+`configure` lui donnait. Et `composefs` passait parce qu'il n'utilise pas
+libarchive, donc n'hérite d'aucun `-L/usr/lib`.
 
-## Ce qui reste à trancher
+La piste multilib avait été écartée à tort : le diagnostic mesurait `/usr/lib`
+**avant** `dnf builddep`, donc avant que la glibc 32 bits n'y soit installée.
+Une mesure au mauvais moment vaut une mesure fausse.
 
-L'explication tient probablement à `slibtool` : `composefs` (autotools/libtool
-classique) se lie sans difficulté avec la même toolchain, `ostree` est la seule
-brique qui passe par `slibtool-shared --prefer-sltdl`. Reste à savoir si c'est
-une régression de cooker (clang 23 / slibtool récents) ou une particularité du
-runner. Pistes non explorées, faute de pouvoir reproduire localement :
+## Correctif
 
-1. relancer le lien avec `-v` pour lire l'invocation réelle de `ld.lld` et voir
-   d'où sort la cible 32 bits (un `-m elf_i386` explicite ?) ;
-2. forcer `libtool` plutôt que `slibtool` sur la seule brique `ostree` ;
-3. reconstruire la même brique sur clairdelune avec un cooker à jour, pour
-   séparer « régression amont » de « particularité du runner ».
+Dans `ostree/ostree.spec`, `%configure` reçoit désormais
+`OT_DEP_LIBARCHIVE_LIBS="-larchive"` : la variable est précachée, `PKG_CHECK_MODULES`
+ne consulte plus `libarchive.pc`, et le `-L` fautif disparaît de la ligne de
+lien. Le `-larchive` suffit, la bibliothèque étant dans le chemin par défaut.
 
-La reproduction locale n'a pas pu être tentée depuis cette session : `podman`
-n'y est pas autorisé.
+Vérifié hors CI sur clairdelune (conteneur cooker, brique `ostree` seule) : les
+8 RPM sont produits. Confirmé ensuite sur le runner, où la CI dépasse ostree et
+s'arrête plus loin.
+
+`tools/ci-build-rpms.sh` ne porte plus le diagnostic devenu inutile, mais
+signale au passage les autres `.pc` dont le `libdir` pointe `/usr/lib` : c'est le
+même piège qui attend la prochaine brique.
+
+## Ce qui bloque maintenant : bootc
+
+La brique suivante, `bootc`, échoue à la compilation de son `xtask` (cible
+`manpages` du Makefile), sur une erreur interne du compilateur :
+
+```
+rustc-LLVM ERROR: expected function definition _RNvCs..._7___rustc12___rust_alloc
+                 to have an associated value info.
+error: could not compile `xtask` (bin "xtask")
+make: *** [Makefile:44: manpages] Error 101
+```
+
+C'est une régression de la toolchain Rust de cooker, sans rapport avec le lien
+d'ostree : le profil `release` de bootc compile en `-C lto=thin`, et l'ICE tombe
+dans le codegen LTO. Piste en cours d'essai : neutraliser le LTO pour cette
+brique (`CARGO_PROFILE_RELEASE_LTO=false`).
+
+Runs de référence : 35452447126 et 35453023297 (échec ostree, avant correctif),
+36005802490 (ostree passé, échec bootc).
