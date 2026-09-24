@@ -117,7 +117,18 @@ GRUB2 integration for OSTree
 %build
 env NOCONFIGURE=1 ./autogen.sh
 export CFLAGS="%optflags -Wno-undef"
+# OT_DEP_LIBARCHIVE_LIBS forcé : le libarchive.pc d'OMV déclare
+# libdir=${exec_prefix}/lib alors que la bibliothèque 64 bits vit dans
+# /usr/lib64. `pkg-config --libs libarchive` rend donc « -L/usr/lib -larchive »,
+# et ce -L arrive en deuxième position sur la ligne de lien, avant tous les
+# -L…/lib64. Or /usr/lib est le répertoire 32 bits, et glibc-devel (tiré par les
+# BuildRequires) y pose /usr/lib/libc.so, un script ld qui commence par
+# OUTPUT_FORMAT(elf32-i386). ld.lld applique cet OUTPUT_FORMAT et écrase son
+# propre « -m elf_x86_64 » : tous les objets 64 bits deviennent alors
+# « incompatible with elf32-i386 » et libostree-1.so ne se lie plus.
+# On garde le -larchive et on jette le -L fautif.
 %configure \
+    OT_DEP_LIBARCHIVE_LIBS="-larchive" \
     --disable-silent-rules \
     --enable-gtk-doc \
     --with-curl \

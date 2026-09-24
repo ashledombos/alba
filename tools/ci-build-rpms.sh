@@ -30,35 +30,23 @@ dnf --refresh -y install \
     rpm-build rpmdevtools createrepo_c patch tar zstd python3 \
     make gcc lib64atomic-devel rust cargo go-md2man
 
-# --- diagnostic toolchain --------------------------------------------------
-# Le lien de libostree a échoué en CI avec « ld.lld: error: <objet 64 bits> is
-# incompatible with elf32-i386 » : lld a retenu une cible 32 bits alors que
-# tous les objets sont en 64 bits. La seule anomalie de la ligne de lien est
-# « -L/usr/lib -larchive » (sur OMV x86_64, /usr/lib est le répertoire 32 bits,
-# le 64 bits vit dans /usr/lib64). On mesure donc l'état réel du conteneur
-# plutôt que de corriger à l'aveugle. Purement informatif : n'interrompt rien.
-diagnostic_toolchain() {
-    echo "=== diagnostic toolchain (informatif) ==="
-    cc --version 2>&1 | head -2 || true
-    ld.lld --version 2>&1 | head -1 || true
-    echo "--- libarchive : 32 bits (/usr/lib) vs 64 bits (/usr/lib64) ---"
-    ls -l /usr/lib/libarchive* 2>&1 | head -5 || true
-    ls -l /usr/lib64/libarchive* 2>&1 | head -5 || true
-    file /usr/lib/libarchive.so /usr/lib64/libarchive.so 2>&1 | head -5 || true
-    echo "--- ce que pkg-config dicte à configure ---"
-    pkg-config --libs libarchive 2>&1 || true
-    pkg-config --libs composefs 2>&1 || true
-    echo "--- lien minimal reprenant la queue de la ligne fautive ---"
-    printf 'int main(void){return 0;}\n' > /tmp/alba-probe.c
-    if cc -m64 -o /tmp/alba-probe /tmp/alba-probe.c \
-           -L/usr/lib -larchive -lcomposefs 2>&1 | head -10; then
-        echo "PROBE: lien 64 bits avec -L/usr/lib OK"
-    else
-        echo "PROBE: lien 64 bits avec -L/usr/lib ECHOUE"
-    fi
-    echo "=== fin diagnostic ==="
+# --- garde-fou : -L/usr/lib sur une ligne de lien 64 bits -------------------
+# Piège OMV, qui a coûté deux runs rouges : /usr/lib est le répertoire 32 bits,
+# et glibc-devel y pose /usr/lib/libc.so, un script ld qui débute par
+# OUTPUT_FORMAT(elf32-i386). ld.lld applique cet OUTPUT_FORMAT et écrase le
+# « -m elf_x86_64 » que le driver lui a pourtant passé ; tous les objets 64 bits
+# deviennent « incompatible with elf32-i386 ». Il suffit donc qu'un .pc mal
+# formé glisse un « -L/usr/lib » AVANT les -L…/lib64 pour casser le lien.
+# libarchive.pc est dans ce cas (libdir=${exec_prefix}/lib) ; ostree.spec s'en
+# protège en forçant OT_DEP_LIBARCHIVE_LIBS. Ici on se contente de signaler les
+# autres .pc atteints, pour que le prochain cas se lise dans le log du run.
+signaler_pc_libdir_32() {
+    echo "=== .pc qui pointent /usr/lib (piège elf32-i386) ==="
+    grep -l '^libdir=${exec_prefix}/lib$' /usr/lib64/pkgconfig/*.pc 2>/dev/null \
+        | sed 's#.*/##' | tr '\n' ' ' || true
+    echo
 }
-diagnostic_toolchain || true
+signaler_pc_libdir_32 || true
 
 printf '[alba-local]\nname=Alba local bricks\nbaseurl=file://%s\nenabled=1\ngpgcheck=0\npriority=1\n' \
     "$RPMS" > /etc/yum.repos.d/alba-local.repo
